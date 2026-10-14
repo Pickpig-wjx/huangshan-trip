@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>黄山之旅 · 5日行程地图</title>
 <meta name="description" content="深圳—黄山塔川篁岭5日亲子赏秋行程地图 2026.11.17-11.21">
+<meta name="referrer" content="no-referrer">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style id="leaflet-css">/* required styles */
@@ -846,7 +847,7 @@ a { color: var(--accent); text-decoration: none; }
 </head>
 <body>
 
-<div id="map"></div>
+<div id="map"><div id="maploading" style="height:100%;display:flex;align-items:center;justify-content:center;color:#aea699;font-size:14px">正在连接地图源…</div></div>
 <div class="tabs" id="tabs"></div>
 <div class="content" id="content"></div>
 
@@ -1000,7 +1001,7 @@ function overviewContent() {
   <div class="legend-item"><div class="legend-dot" style="background:var(--tint-orange)"></div>住宿</div>
   <div class="legend-item"><div class="legend-dot" style="background:var(--text-tertiary)"></div>交通</div>
 </div>
-<p style="font-size:12px;color:var(--text-tertiary);padding:8px 0">地图标记序号=当日游览顺序 · 点卡片「导航」选高德/苹果/百度 · 📕=小红书攻略 · 🍜=大众点评 · 底图©高德</p>`;
+<p style="font-size:12px;color:var(--text-tertiary);padding:8px 0">地图标记序号=当日游览顺序 · 点卡片「导航」选高德/苹果/百度 · 📕=小红书攻略 · 🍜=大众点评 · 底图自动选用 高德/腾讯/OSM</p>`;
 }
 
 /* ══════════ ENGINE ══════════ */
@@ -1020,18 +1021,45 @@ function wgs2gcj(lat, lng) {
   return [lat + dLat, lng + dLng];
 }
 
-const map = L.map('map', { center: wgs2gcj(29.9, 118.15), zoom: 9, zoomControl: false, attributionControl: true });
-L.control.zoom({ position: 'topright' }).addTo(map);
-/* 高德瓦片：国内加载快；境外/加载失败自动回退 OSM */
-const amapLayer = L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', { subdomains: '1234', maxZoom: 18, attribution: '© 高德地图' });
-amapLayer.addTo(map);
-let _tileErr = 0;
-amapLayer.on('tileerror', () => {
-  if (++_tileErr === 10) {
-    map.removeLayer(amapLayer);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
-  }
-});
+/* 瓦片源级联：启动时并行探测，按优先级选第一个能通的；运行中连续失败则自动切下一个 */
+const TILE_SOURCES = [
+  { name: '高德', url: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', sub: '1234', gcj: true,
+    probe: 'https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=857&y=444&z=10' },
+  { name: '高德备', url: 'https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}', sub: '1234', gcj: true,
+    probe: 'https://wprd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x=857&y=444&z=10' },
+  { name: '腾讯', url: 'https://rt{s}.map.gtimg.com/realtimerender?z={z}&x={x}&y={-y}&type=vector&style=0', sub: '0123', gcj: true,
+    probe: 'https://rt1.map.gtimg.com/realtimerender?z=10&x=857&y=579&type=vector&style=0' },
+  { name: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', sub: null, gcj: false,
+    probe: 'https://tile.openstreetmap.org/10/857/444.png' }
+];
+let map, baseLayer, curSrcIdx = 0;
+let conv = wgs2gcj;
+function probeTile(src, ms) {
+  return new Promise(res => {
+    const img = new Image();
+    const t = setTimeout(() => { img.src = ''; res(false); }, ms);
+    img.onload = () => { clearTimeout(t); res(true); };
+    img.onerror = () => { clearTimeout(t); res(false); };
+    img.src = src.probe + '&_t=' + Date.now();
+  });
+}
+function useSource(i) {
+  curSrcIdx = i;
+  const src = TILE_SOURCES[i];
+  const prevGcj = conv === wgs2gcj;
+  conv = src.gcj ? wgs2gcj : ((a, b) => [a, b]);
+  if (baseLayer) map.removeLayer(baseLayer);
+  const opt = { maxZoom: 18, attribution: '© ' + src.name };
+  if (src.sub) opt.subdomains = src.sub;
+  baseLayer = L.tileLayer(src.url, opt).addTo(map);
+  let errs = 0;
+  baseLayer.on('tileerror', () => {
+    if (++errs === 12 && curSrcIdx + 1 < TILE_SOURCES.length) {
+      useSource(curSrcIdx + 1);
+      if ((TILE_SOURCES[curSrcIdx].gcj === true) !== prevGcj) { showDay(cur); }
+    }
+  });
+}
 
 const LocateControl = L.Control.extend({
   options: { position: 'bottomright' },
@@ -1044,10 +1072,11 @@ const LocateControl = L.Control.extend({
     return btn;
   }
 });
+function attachLocate() {
 new LocateControl().addTo(map);
 let locMarker, locCircle;
 map.on('locationfound', e => {
-  const p = wgs2gcj(e.latlng.lat, e.latlng.lng), ll = L.latLng(p[0], p[1]);
+  const p = conv(e.latlng.lat, e.latlng.lng), ll = L.latLng(p[0], p[1]);
   const r = e.accuracy / 2;
   if (locMarker) { locMarker.setLatLng(ll); locCircle.setLatLng(ll).setRadius(r); }
   else {
@@ -1059,6 +1088,7 @@ map.on('locationfound', e => {
   }
 });
 map.on('locationerror', () => {});
+}
 
 function icon(color, label) {
   return L.divIcon({ className: '', html: `<div style="width:28px;height:28px;border-radius:50%;background:${color};border:2.5px solid #fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.18)">${label||''}</div>`, iconSize: [28,28], iconAnchor: [14,14], popupAnchor: [0,-16] });
@@ -1073,11 +1103,11 @@ function showDay(idx) {
   clearMap();
   if (idx === 0) {
     const pts = [];
-    DAYS.forEach(d => d.locations.forEach(l => { if(l.lat && l.lat>23) pts.push(wgs2gcj(l.lat,l.lng)); }));
+    DAYS.forEach(d => d.locations.forEach(l => { if(l.lat && l.lat>23) pts.push(conv(l.lat,l.lng)); }));
     if(pts.length) map.fitBounds(pts, {padding:[30,30]});
     DAYS.slice(1).forEach(d => {
       d.locations.filter(l=>l.time!=='—').forEach(l => {
-        const m = L.circleMarker(wgs2gcj(l.lat,l.lng), { radius:4, fillColor:d.color, color:'#fff', weight:1.5, fillOpacity:.9 }).addTo(map).bindPopup(`<b>${l.name}</b><br><span style="color:#86868b">${d.label}</span>`);
+        const m = L.circleMarker(conv(l.lat,l.lng), { radius:4, fillColor:d.color, color:'#fff', weight:1.5, fillOpacity:.9 }).addTo(map).bindPopup(`<b>${l.name}</b><br><span style="color:#86868b">${d.label}</span>`);
         markers.push(m);
       });
     });
@@ -1091,7 +1121,7 @@ function showDay(idx) {
     if(!l.lat) return;
     const isMain = l.time!=='—';
     if(isMain) seq++;
-    const g = wgs2gcj(l.lat, l.lng);
+    const g = conv(l.lat, l.lng);
     const m = L.marker(g, { icon: icon(day.color, isMain?seq:(emojis[l.type]||'·')), opacity: isMain?1:.65 }).addTo(map);
     m.bindPopup(`<b>${isMain?seq+'. ':''}${l.name}</b>${isMain?'<br><span style="color:#86868b">'+l.time+'</span>':''}<br>${l.desc}${l.budget?'<br><span style="color:#b5542d">'+l.budget+'</span>':''}<br><a href="#" onclick="event.preventDefault();openAS('${l.name.replace(/'/g,"\\'")}',${l.lat},${l.lng},'${(l.navKeyword||'').replace(/'/g,"\\'")}')">📍 导航</a>`);
     markers.push(m);
@@ -1124,10 +1154,47 @@ function dpWebUrl(loc) { return `https://m.dianping.com/searchshop?keyword=${enc
 window._extLocs = {};
 DAYS.forEach(d => d.locations.forEach(l => { window._extLocs[`${d.id}::${l.name}`] = l; }));
 
+function copyText(t) {
+  const done = () => showToast('已复制「' + t + '」');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
+  } else fallbackCopy(t, done);
+}
+function fallbackCopy(t, done) {
+  const ta = document.createElement('textarea');
+  ta.value = t; ta.style.cssText = 'position:fixed;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch(e) {}
+  document.body.removeChild(ta);
+}
+let _toastT;
+function showToast(msg) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'toast';
+    el.style.cssText = 'position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:rgba(43,37,32,.92);color:#fff;font-size:13px;padding:9px 18px;border-radius:20px;z-index:10001;max-width:80vw;text-align:center';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg; el.style.display = 'block';
+  clearTimeout(_toastT); _toastT = setTimeout(() => { el.style.display = 'none'; }, 2200);
+}
+function showKwSheet(kind, kw) {
+  const appName = kind==='dp' ? '大众点评' : '小红书';
+  const safeKw = kw.replace(/'/g, "\\'");
+  const hint = IN_APP_WEBVIEW
+    ? '微信内无法直接跳转 App。复制关键词后，打开 ' + appName + ' App 粘贴搜索；或点右上角 ••• 选「在浏览器打开」后重试按钮。'
+    : '没有自动跳转？可能未安装 ' + appName + ' App。复制关键词后打开 App 粘贴搜索。';
+  document.getElementById('as-opts').innerHTML =
+    '<div style="padding:13px 16px 4px;font-size:13px;color:#666;text-align:center">' + hint + '</div>' +
+    '<button class="as-item" onclick="copyText(\'' + safeKw + '\')">📋 复制关键词「' + kw + '」</button>';
+  asOverlay.classList.add('show');
+}
 function openExt(key, kind) {
   const loc = window._extLocs[key]; if(!loc) return false;
-  if (IN_APP_WEBVIEW) { window.location.href = kind==='dp' ? dpWebUrl(loc) : xhsWebUrl(loc); }
-  else { window.location.href = kind==='dp' ? dpAppUrl(loc) : xhsAppUrl(loc); }
+  const kw = kind==='dp' ? dpKeyword(loc) : xhsKeyword(loc);
+  if (IN_APP_WEBVIEW) { showKwSheet(kind, kw); return false; }
+  window.location.href = kind==='dp' ? dpAppUrl(loc) : xhsAppUrl(loc);
+  setTimeout(() => { if (!document.hidden) showKwSheet(kind, kw); }, 1600);
   return false;
 }
 function openXhs(key) { return openExt(key, 'xhs'); }
@@ -1143,13 +1210,11 @@ function locCard(loc, dayIdx, seq) {
   const seqHtml = seq ? `<span class="seq" style="background:${day.color}">${seq}</span>` : '';
   let lnk = `<button class="btn nav" onclick="openAS('${loc.name.replace(/'/g,"\\'")}',${loc.lat},${loc.lng},'${(loc.navKeyword||'').replace(/'/g,"\\'")}')">📍 导航</button>`;
   if(loc.xhs||loc.xhsKeyword||loc.type==='spot') {
-    const xhsHref = IN_APP_WEBVIEW ? xhsWebUrl(loc) : xhsAppUrl(loc);
-    lnk += `<a href="${xhsHref}" onclick="return openXhs('${locKey.replace(/'/g,"\\'")}')" class="btn xhs">📕 小红书</a>`;
+    lnk += `<a href="javascript:void(0)" onclick="return openXhs('${locKey.replace(/'/g,"\\'")}')" class="btn xhs">📕 小红书</a>`;
   }
   const dpEnabled = loc.dianping !== false && (loc.dianping || loc.dianpingKeyword || loc.type==='food' || loc.type==='drink');
   if(dpEnabled) {
-    const dpHref = IN_APP_WEBVIEW ? dpWebUrl(loc) : dpAppUrl(loc);
-    lnk += `<a href="${dpHref}" onclick="return openDp('${locKey.replace(/'/g,"\\'")}')" class="btn dp">🍜 点评</a>`;
+    lnk += `<a href="javascript:void(0)" onclick="return openDp('${locKey.replace(/'/g,"\\'")}')" class="btn dp">🍜 点评</a>`;
   }
   if(loc.reserve) lnk += `<a href="${loc.reserve}" target="_blank" class="btn rsv">📅 预约</a>`;
   return `<div class="tl-item"><div class="tl-dot ${dot}"></div><div class="card" onclick="if(!event.target.closest('.btn,.links'))toggle('${uid}')"><div class="time">${loc.time!=='—'?loc.time:'备选'}</div><div class="name">${seqHtml}${bdg} ${loc.name}</div><div class="desc">${loc.desc}</div>${loc.budget?'<div class="budget">'+loc.budget+'</div>':''}<div class="links">${lnk}</div>${loc.detail?'<div class="details" id="'+uid+'">'+loc.detail.replace(/\n/g,'<br>')+'</div>':''}</div></div>`;
@@ -1182,7 +1247,7 @@ function go(idx) {
   cur = idx;
   tabsEl.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', +t.dataset.day===idx));
   contentEl.innerHTML = idx===0 ? overviewContent() : renderDay(idx);
-  showDay(idx);
+  if (map) showDay(idx);
   window.scrollTo({top:0});
   const tab = tabsEl.querySelector(`[data-day="${idx}"]`);
   if(tab) tab.scrollIntoView({behavior:'smooth', inline:'center', block:'nearest'});
@@ -1192,7 +1257,15 @@ function toggle(id) { const el=document.getElementById(id); if(el) el.classList.
 
 tabsEl.addEventListener('click', e => { const t=e.target.closest('.tab'); if(t) go(+t.dataset.day); });
 
-go(0);
+go(0); // 先渲染卡片列表；地图在源探测完成后由 boot() 挂载
+
+/* ── 微信内提示横幅 ── */
+if (IN_APP_WEBVIEW) {
+  const bar = document.createElement('div');
+  bar.style.cssText = 'background:#b5542d;color:#fff;font-size:12.5px;padding:8px 36px 8px 14px;position:relative;z-index:101;line-height:1.5';
+  bar.innerHTML = '微信内打开功能受限：点右上角 <b>•••</b> → <b>在浏览器打开</b>，导航和小红书按钮才能跳转 App。<span style="position:absolute;right:10px;top:6px;font-size:16px;padding:2px 6px" onclick="this.parentNode.remove()">✕</span>';
+  document.body.insertBefore(bar, document.getElementById('map'));
+}
 
 /* ── 导航 Action Sheet：高德 / Apple / 百度 ── */
 const asOverlay = document.createElement('div');
@@ -1224,6 +1297,21 @@ function openAS(name, lat, lng, kw) {
   asOverlay.classList.add('show');
 }
 function closeAS() { asOverlay.classList.remove('show'); }
+
+/* ── 启动：并行探测瓦片源，选第一个可用的再建地图 ── */
+function boot(srcIdx) {
+  const ld = document.getElementById('maploading'); if (ld) ld.remove();
+  map = L.map('map', { center: [29.9, 118.15], zoom: 9, zoomControl: false, attributionControl: true });
+  L.control.zoom({ position: 'topright' }).addTo(map);
+  useSource(srcIdx);
+  map.setView(conv(29.9, 118.15), 9);
+  attachLocate();
+  go(cur);
+}
+Promise.all(TILE_SOURCES.map(s => probeTile(s, 4000))).then(rs => {
+  let i = rs.findIndex(x => x);
+  boot(i < 0 ? 0 : i);
+});
 </script>
 </body>
 </html>
